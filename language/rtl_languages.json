@@ -1,0 +1,9 @@
+{
+  "_comment": "RTL-Sprachcodes – Sprachen mit Rechts-nach-Links Schreibrichtung. Neue Codes hier einfach ergänzen.",
+  "codes": [
+    "ar",   "he",  "fa",  "ur",  "ps",
+    "sd",   "ug",  "yi",  "dv",  "ku",
+    "syr",  "arc", "nqo", "rhg", "lad",
+    "ckb"
+  ]
+}
