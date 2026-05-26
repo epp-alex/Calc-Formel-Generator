@@ -398,3 +398,17 @@ favoriten.json                  ← local favourites (created automatically)
 ## Licence
 
 Free to use for personal and commercial purposes.
+
+## 📸 Screenshots
+
+<p align="center">
+  <img src="Screenshot01.png" alt="Calc Generator Interface" width="80%" />
+</p>
+
+<p align="center">
+  <img src="Screenshot02.png" alt="Formulas and Options" width="80%" />
+</p>
+
+<p align="center">
+  <img src="Screenshot03.png" alt="Calculation Results" width="80%" />
+</p>
