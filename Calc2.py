@@ -3,7 +3,7 @@
 """
 LibreOffice Calc Formel Helper
 ─────────────────────────────────────────────────────────────────────────────
-Version:  1.0.1  |  Datum: 2025-05-08
+Version:  1.0.2  |  Datum: 2026-05-27
 ─────────────────────────────────────────────────────────────────────────────
 Datei-Struktur:
 
@@ -56,7 +56,6 @@ JSON-Format  favoriten.json:
   Altes Format (einfache String-Liste) wird automatisch migriert.
 ─────────────────────────────────────────────────────────────────────────────
 """
-from __future__ import annotations
 import datetime
 import hashlib
 import json
@@ -72,7 +71,6 @@ import tempfile
 import time
 import traceback
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
 
 # ---------------------------------------------------------------------------
 # sys.path absichern: services/ muss neben Calc2.py liegen.
@@ -140,6 +138,38 @@ from services.plugin_loader import load_all_plugins, resolve_formulas, get_plugi
 # Version
 # ---------------------------------------------------------------------------
 _FONTS_RC_OK = False
+
+def _pt(size: int) -> int:
+    """Skaliert Schriftgrössen auf Mac automatisch hoch (96 DPI → 72 DPI Ausgleich)."""
+    import platform
+    if platform.system() == "Darwin":
+        return round(size * 1.35)
+    return size
+
+def _system_ui_font_family() -> str:
+    """Gibt die beste UI-Schrift für das aktuelle Betriebssystem zurück."""
+    import platform
+    system = platform.system()
+    if system == "Darwin":
+        return "SF Pro Text"
+    elif system == "Windows":
+        return "Segoe UI"
+    else:
+        return "Ubuntu"
+
+def _pt(size: int) -> int:
+    """Skaliert Schriftgrössen auf Mac automatisch hoch."""
+    import platform
+    if platform.system() == "Darwin":
+        return round(size * 1.35)
+    return size
+
+def _system_ui_font_family() -> str:
+    import platform
+    s = platform.system()
+    if s == "Darwin": return "SF Pro Text"
+    if s == "Windows": return "Segoe UI"
+    return "Ubuntu"
 
 def _register_hindi_font() -> bool:
     if not _FONTS_RC_OK:
@@ -212,51 +242,84 @@ def _get_font_for_lang(lang_code):
     return None
 
 def _install_font_if_needed(font_path: str, font_name: str) -> bool:
-    import ctypes
-    win_fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
-    dest = win_fonts / Path(font_path).name
-    if dest.exists():
-        return True
-    try:
-        is_admin = ctypes.windll.shell32.IsUserAnAdmin()
-        if not is_admin:
-            result = ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", sys.executable,
-                f'"{Path(__file__).resolve()}" --install-font "{font_path}"',
-                None, 1
-            )
-            return result > 32
-        import shutil
-        shutil.copy2(font_path, dest)
-        import winreg
-        key_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path,
-                            0, winreg.KEY_SET_VALUE) as key:
-            winreg.SetValueEx(key, f"{font_name} (TrueType)",
-                              0, winreg.REG_SZ, Path(font_path).name)
-        ctypes.windll.gdi32.AddFontResourceW(str(dest))
-        ctypes.windll.user32.SendMessageW(0xFFFF, 0x001D, 0, 0)
-        return True
-    except Exception as e:
-        print(f"Font-Installation fehlgeschlagen: {e}")
-        return False
+    """Font-Installation: Windows → Registry, macOS → ~/Library/Fonts, Linux → ~/.local/share/fonts"""
+    import platform, shutil
+    system = platform.system()
+    src = Path(font_path)
+    if system == "Windows":
+        import ctypes
+        win_fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+        dest = win_fonts / src.name
+        if dest.exists():
+            return True
+        try:
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin()
+            if not is_admin:
+                result = ctypes.windll.shell32.ShellExecuteW(
+                    None, "runas", sys.executable,
+                    f'"{Path(__file__).resolve()}" --install-font "{font_path}"',
+                    None, 1
+                )
+                return result > 32
+            shutil.copy2(font_path, dest)
+            import winreg
+            key_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path,
+                                0, winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, f"{font_name} (TrueType)", 0, winreg.REG_SZ, src.name)
+            ctypes.windll.gdi32.AddFontResourceW(str(dest))
+            ctypes.windll.user32.SendMessageW(0xFFFF, 0x001D, 0, 0)
+            return True
+        except Exception as e:
+            print(f"Font-Installation fehlgeschlagen (Windows): {e}")
+            return False
+    elif system == "Darwin":
+        dest_dir = Path.home() / "Library" / "Fonts"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / src.name
+        if dest.exists():
+            return True
+        try:
+            shutil.copy2(font_path, dest)
+            return True
+        except Exception as e:
+            print(f"Font-Installation fehlgeschlagen (macOS): {e}")
+            return False
+    else:
+        dest_dir = Path.home() / ".local" / "share" / "fonts"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / src.name
+        if dest.exists():
+            return True
+        try:
+            shutil.copy2(font_path, dest)
+            subprocess.run(["fc-cache", "-f", str(dest_dir)], capture_output=True, timeout=10)
+            return True
+        except Exception as e:
+            print(f"Font-Installation fehlgeschlagen (Linux): {e}")
+            return False
 
 def _ensure_hindi_font(app) -> None:
+    import platform
     font_file = _here / "fonts" / "NotoSansDevanagari-Regular.ttf"
     if not font_file.exists():
         return
     families = QFontDatabase().families()
     already_ok = any("Noto Sans Devanagari" in f for f in families)
     if already_ok:
-        win_fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
-        if (win_fonts / font_file.name).exists():
-            return
+        return
+    system = platform.system()
+    if system == "Darwin":
+        hint = "Der Font wird in ~/Library/Fonts/ installiert.\nKein Administratorkennwort nötig."
+    elif system == "Windows":
+        hint = "Windows fragt möglicherweise nach Administrator-Rechten."
+    else:
+        hint = "Der Font wird in ~/.local/share/fonts/ installiert."
     msg = QMessageBox()
     msg.setWindowTitle("Hindi-Schrift installieren")
     msg.setText(
-        "Fuer die Hindi-Schrift muss einmalig der Font\n"
-        "'Noto Sans Devanagari' systemweit installiert werden.\n\n"
-        "Windows fragt moeglicherweise nach Administrator-Rechten."
+        "Für die Hindi-Schrift muss einmalig der Font\n"
+        "'Noto Sans Devanagari' installiert werden.\n\n" + hint
     )
     msg.setIcon(QMessageBox.Information)
     msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
@@ -268,8 +331,14 @@ def _ensure_hindi_font(app) -> None:
         QMessageBox.information(None, "Fertig",
             "Font erfolgreich installiert!\nDie Schrift wird ab jetzt korrekt angezeigt.")
     else:
+        if system == "Darwin":
+            anleitung = "fonts/NotoSansDevanagari-Regular.ttf\nin ~/Library/Fonts/ kopieren."
+        elif system == "Windows":
+            anleitung = "fonts/NotoSansDevanagari-Regular.ttf\nmanuell per Rechtsklick → Für alle Benutzer installieren."
+        else:
+            anleitung = "fonts/NotoSansDevanagari-Regular.ttf\nnach ~/.local/share/fonts/ kopieren,\ndann fc-cache -f im Terminal ausführen."
         QMessageBox.warning(None, "Hinweis",
-            "Font konnte nicht installiert werden.\nBitte fonts/NotoSansDevanagari-Regular.ttf\nmanuell per Rechtsklick > Fuer alle Benutzer installieren.")
+            "Font konnte nicht installiert werden.\n\nManuell:\n" + anleitung)
 
 def _ui_font(lang_code, size=9, bold=False):
     if lang_code in _LANG_FONTS:
@@ -279,7 +348,7 @@ def _ui_font(lang_code, size=9, bold=False):
         font.setStyleStrategy(QFont.PreferAntialias)
         font.setHintingPreference(QFont.PreferNoHinting)
     else:
-        font = QFont("Segoe UI", size, QFont.Bold if bold else QFont.Normal)
+        font = QFont(_system_ui_font_family(), size, QFont.Bold if bold else QFont.Normal)
     return font
 
 def _build_lang_font(lang_code):
@@ -290,7 +359,7 @@ def _build_lang_font(lang_code):
         font.setStyleStrategy(QFont.PreferAntialias)
         font.setHintingPreference(QFont.PreferNoHinting)
         return font
-    return QFont("Segoe UI", 9)
+    return QFont("Segoe UI", _pt(9))
 
 def _apply_font_recursive(widget, font):
     widget.setFont(font)
@@ -298,22 +367,6 @@ def _apply_font_recursive(widget, font):
         child.setFont(font)
 
 def _apply_font_to_app(app, lang_code):
-    # WICHTIG FÜR PYTHON 3.8: Geister-Widgets herausfiltern
-    try:
-        from sip import isdeleted
-        isValid = lambda obj: not isdeleted(obj)
-    except ImportError:
-        isValid = lambda obj: True
-
-    safe_widgets = []
-    for w in app.allWidgets():
-        try:
-            # Nur Widgets anfassen, die im RAM noch gültig, sichtbar und bearbeitbar sind
-            if w and isValid(w) and not w.isHidden() and hasattr(w, "setFont"):
-                safe_widgets.append(w)
-        except (RuntimeError, ReferenceError):
-            pass
-
     if lang_code in _LANG_FONTS:
         family, size = _LANG_FONTS[lang_code]
         font = QFont(family, size)
@@ -321,23 +374,11 @@ def _apply_font_to_app(app, lang_code):
         font.setStyleStrategy(QFont.PreferAntialias)
         font.setHintingPreference(QFont.PreferNoHinting)
         app.setFont(font)
-        for w in safe_widgets:
-            try:
-                if isValid(w):
-                    w.setFont(font)
-            except (RuntimeError, ReferenceError):
-                pass
+        for w in app.allWidgets():
+            w.setFont(font)
     else:
-        # WICHTIG: Ein leerer CSS-Kommentar statt "" verhindert den Crash unter Python 3.8!
-        app.setStyleSheet("/* app font reset */")
-        font = QFont("Segoe UI", 9)
-        app.setFont(font)
-        for w in safe_widgets:
-            try:
-                if isValid(w):
-                    w.setFont(font)
-            except (RuntimeError, ReferenceError):
-                pass
+        app.setStyleSheet("")
+        app.setFont(QFont("Segoe UI", _pt(9)))
 
 # ---------------------------------------------------------------------------
 APP_VERSION      = "1.0.1"
@@ -358,18 +399,20 @@ if _lang_file_new.exists():
     if hasattr(_is, "LANG_FILE"):
         _is.LANG_FILE = _lang_file_new
 elif not LANG_FILE.exists():
-    import ctypes
-    ctypes.windll.user32.MessageBoxW(
-        0,
+    _tmp_app = QApplication.instance() or QApplication(sys.argv)
+    _mb = QMessageBox()
+    _mb.setIcon(QMessageBox.Critical)
+    _mb.setWindowTitle("Calc2 – Fehler")
+    _mb.setText(
         f"languages.json nicht gefunden!\n\nErwartet unter:\n  {_lang_file_new}\n\n"
-        f"Bitte sicherstellen dass der language/ Ordner\nneben Calc2.py liegt.",
-        "Calc2 – Fehler", 0x10
+        f"Bitte sicherstellen dass der language/ Ordner\nneben Calc2.py liegt."
     )
+    _mb.exec_()
     sys.exit(1)
 
 
 class FormulaHighlighter(QSyntaxHighlighter):
-    SYNTAX_PATTERNS: Dict[str, Tuple[str, int]] = {
+    SYNTAX_PATTERNS: "dict[str, tuple[str, int]]" = {
         "cell_range": (r"\b[A-Z]+[0-9]+:[A-Z]+[0-9]+\b", 0),
         "cell_ref":   (r"\b[A-Z]+[0-9]+\b",               0),
         "string":     (r'"[^"]*"',                         0),
@@ -377,7 +420,7 @@ class FormulaHighlighter(QSyntaxHighlighter):
         "operator":   (r"[+\-*/=;(),]",                    0),
     }
 
-    _THEME_MAP: Dict[str, str] = {
+    _THEME_MAP: "dict[str, str]" = {
         "cell_range": "hl_cell",
         "cell_ref":   "hl_cell",
         "string":     "hl_string",
@@ -387,7 +430,7 @@ class FormulaHighlighter(QSyntaxHighlighter):
 
     def __init__(self, document, functions=None):
         super().__init__(document)
-        self.rules: List[Tuple[re.Pattern, QTextCharFormat]] = []
+        self.rules: "list[tuple[re.Pattern, QTextCharFormat]]" = []
         func_fmt = QTextCharFormat()
         func_fmt.setForeground(QColor(THEME["hl_function"]))
         func_fmt.setFontWeight(QFont.Bold)
@@ -398,22 +441,6 @@ class FormulaHighlighter(QSyntaxHighlighter):
             fmt = QTextCharFormat()
             fmt.setForeground(QColor(THEME[self._THEME_MAP[key]]))
             self.rules.append((re.compile(raw, flags), fmt))
-
-    def refresh_rules(self, functions=None) -> None:
-        """Regeln und Farben aktualisieren (z.B. nach Theme-Wechsel).
-        Kein Neuerstellen des Highlighters – vermeidet PyQt5-Segfaults."""
-        self.rules = []
-        func_fmt = QTextCharFormat()
-        func_fmt.setForeground(QColor(THEME["hl_function"]))
-        func_fmt.setFontWeight(QFont.Bold)
-        for f in (functions or []):
-            pat = re.compile(r"\b" + re.escape(f) + r"\b", re.IGNORECASE)
-            self.rules.append((pat, func_fmt))
-        for key, (raw, flags) in self.SYNTAX_PATTERNS.items():
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor(THEME[self._THEME_MAP[key]]))
-            self.rules.append((re.compile(raw, flags), fmt))
-        self.rehighlight()
 
     def highlightBlock(self, text: str) -> None:
         for pattern, fmt in self.rules:
@@ -450,9 +477,8 @@ def apply_theme(app: "QApplication", dark: bool) -> None:
         palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(120, 120, 120))
         app.setPalette(palette)
     else:
-        # Sicherer Reset ohne instabile native Paletten-Rückgabewerte
-        app.setPalette(QPalette())
-        app.setStyleSheet("/* theme reset light */")
+        app.setPalette(app.style().standardPalette())
+
 
 def load_languages() -> dict:
     lang = _load_early_lang()
@@ -520,7 +546,7 @@ class DocDialog(QDialog):
         lbl = QLabel(title)
         
         # Überschrift-Schriftart setzen
-        lbl.setFont(_ui_font(self.current_lang, 12, bold=True))
+        lbl.setFont(_ui_font(self.current_lang, _pt(12), bold=True))
         
         header.addWidget(lbl)
         header.addStretch()
@@ -539,7 +565,7 @@ class DocDialog(QDialog):
         if self.current_lang == "hi":
             # Noto Sans Devanagari erzwingen
             # Größe 13 oder 14 ist für Hindi oft besser lesbar als 10
-            hindi_font = QFont("Noto Sans Devanagari", 10)
+            hindi_font = QFont("Noto Sans Devanagari", _pt(10))
             txt.setFont(hindi_font)
             
             # CSS nutzen, um das "fette" Aussehen von Windows-Standard-Fonts zu verhindern
@@ -551,7 +577,7 @@ class DocDialog(QDialog):
             """)
         else:
             # Standard für alle anderen Sprachen
-            txt.setFont(QFont(Config.FONT_MONO, 10))
+            txt.setFont(QFont(Config.FONT_MONO, _pt(10)))
 
         # Inhalt setzen (Nutze setMarkdown, falls deine Dateien Formatierungen haben)
         txt.setPlainText(content) 
@@ -694,7 +720,7 @@ class AdminPanelDialog(QDialog):
         info_lbl.setWordWrap(True)
         layout.addWidget(info_lbl)
         self._list = QListWidget()
-        self._list.setFont(QFont(Config.FONT_MONO, 10))
+        self._list.setFont(QFont(Config.FONT_MONO, _pt(10)))
         self._list.setSelectionMode(QAbstractItemView.SingleSelection)
         self._list.itemDoubleClicked.connect(self._edit_entry)
         layout.addWidget(self._list, stretch=1)
@@ -703,7 +729,7 @@ class AdminPanelDialog(QDialog):
         form_layout.setSpacing(6)
         form_layout.addWidget(QLabel(self._tr("adm_form_formel")), 0, 0)
         self._f_formel = QLineEdit()
-        self._f_formel.setFont(QFont(Config.FONT_MONO, 10))
+        self._f_formel.setFont(QFont(Config.FONT_MONO, _pt(10)))
         self._f_formel.setPlaceholderText(self._tr("placeholder_example_formula"))
         form_layout.addWidget(self._f_formel, 0, 1)
         form_layout.addWidget(QLabel(self._tr("adm_form_label")), 1, 0)
@@ -900,7 +926,7 @@ class BackupRestoreDialog(QDialog):
         "plugins",
     ]
 
-    def __init__(self, parent, mode: str, net_base: Optional[Path], base_dir: Path):
+    def __init__(self, parent, mode: str, net_base: "Path | None", base_dir: Path):
         """
         mode     : "backup" oder "restore"
         net_base : Netzlaufwerk-Basispfad (aus settings["net_path"])
@@ -1006,7 +1032,7 @@ class BackupRestoreDialog(QDialog):
             return False
         return True
 
-    def _validate_inputs(self) -> Optional[Tuple[str, str]]:
+    def _validate_inputs(self) -> "tuple[str,str] | None":
         user = self._user_edit.text().strip()
         pw   = self._pw_edit.text()
         if not user:
@@ -1267,9 +1293,9 @@ class CalcFormelHelper(QMainWindow):
         self.current_lang = self.settings["language"]
         self._dark_mode   = bool(self.settings.get("dark_mode", False))
         self.favoriten: list = sync_from_network(self.settings)
-        self._verlauf: List[str] = load_history()
+        self._verlauf: "list[str]" = load_history()
         self._init_undo()
-        self._sync_workers: Set[SyncWorker] = set()
+        self._sync_workers: "set[SyncWorker]" = set()
         self._plugins = load_all_plugins(
             plugins_dir   = _here / "plugins",
             lang          = self.current_lang,
@@ -1316,7 +1342,12 @@ class CalcFormelHelper(QMainWindow):
 
     def _toggle_minimize(self) -> None:
         if self.isMinimized():
-            self.showNormal(); self.activateWindow(); self.raise_()
+            def _restore():
+                self.showNormal()
+                self.activateWindow()
+                self.raise_()
+                self.setFocus()
+            QTimer.singleShot(150, _restore)
         else:
             self.showMinimized()
 
@@ -1324,7 +1355,7 @@ class CalcFormelHelper(QMainWindow):
     # Übersetzung
     # -----------------------------------------------------------------------
     # Mapping from internal f_key → English function name (key in libreoffice_calc_translations.json)
-    _F_KEY_TO_EN: Dict[str, str] = {
+    _F_KEY_TO_EN: "dict[str, str]" = {
         "f_sum":       "SUM",
         "f_avg":       "AVERAGE",
         "f_min":       "MIN",
@@ -1413,7 +1444,7 @@ class CalcFormelHelper(QMainWindow):
         # All other keys → UI strings from languages.json
         return self.langs.get(self.current_lang, {}).get(key, key)
 
-    def _get_function_names(self) -> List[str]:
+    def _get_function_names(self) -> "list[str]":
         if self._calc_tr:
             return [
                 entry.get(self.current_lang) or entry.get("en", "")
@@ -1560,7 +1591,7 @@ class CalcFormelHelper(QMainWindow):
         header = QHBoxLayout()
         header.setSpacing(6)
         title_lbl = QLabel(self.tr("main_title"))
-        title_lbl.setFont(_ui_font(self.current_lang, 16, bold=True))
+        title_lbl.setFont(_ui_font(self.current_lang, _pt(16), bold=True))
         header.addWidget(title_lbl)
         header.addStretch()
         if getattr(sys, "frozen", False):
@@ -1719,7 +1750,7 @@ class CalcFormelHelper(QMainWindow):
         return num
 
     @classmethod
-    def _valid_cell(cls, text: str, tr=None) -> Tuple[bool, str]:
+    def _valid_cell(cls, text: str, tr=None) -> "tuple[bool, str]":
         def _t(key, **kwargs):
             if tr:
                 msg = tr(key)
@@ -1736,7 +1767,7 @@ class CalcFormelHelper(QMainWindow):
         return True, ""
 
     @classmethod
-    def _valid_range(cls, text: str, tr=None) -> Tuple[bool, str]:
+    def _valid_range(cls, text: str, tr=None) -> "tuple[bool, str]":
         def _t(key, **kwargs):
             if tr:
                 msg = tr(key)
@@ -1859,7 +1890,7 @@ class CalcFormelHelper(QMainWindow):
         layout = QVBoxLayout(t)
         layout.setSpacing(8)
         lbl_arith = QLabel(self.tr("sec_arithmetic"))
-        lbl_arith.setFont(_ui_font(self.current_lang, 9, bold=True))
+        lbl_arith.setFont(_ui_font(self.current_lang, _pt(9), bold=True))
         layout.addWidget(lbl_arith)
         row_arith = QHBoxLayout()
         for op in ["+", "-", "*", "/", "^"]:
@@ -1871,7 +1902,7 @@ class CalcFormelHelper(QMainWindow):
         row_arith.addStretch()
         layout.addLayout(row_arith)
         lbl_stat = QLabel(self.tr("sec_statistics"))
-        lbl_stat.setFont(_ui_font(self.current_lang, 9, bold=True))
+        lbl_stat.setFont(_ui_font(self.current_lang, _pt(9), bold=True))
         layout.addWidget(lbl_stat)
         stat_grid = QGridLayout()
         stat_grid.setSpacing(4)
@@ -1897,7 +1928,7 @@ class CalcFormelHelper(QMainWindow):
         layout = QVBoxLayout(t)
         layout.setSpacing(8)
         lbl_logic = QLabel(self.tr("sec_logic"))
-        lbl_logic.setFont(_ui_font(self.current_lang, 9, bold=True))
+        lbl_logic.setFont(_ui_font(self.current_lang, _pt(9), bold=True))
         layout.addWidget(lbl_logic)
         row_logic = QHBoxLayout()
         _logic_previews = {
@@ -1914,7 +1945,7 @@ class CalcFormelHelper(QMainWindow):
         row_logic.addStretch()
         layout.addLayout(row_logic)
         lbl_cond = QLabel(self.tr("sec_conditional"))
-        lbl_cond.setFont(_ui_font(self.current_lang, 9, bold=True))
+        lbl_cond.setFont(_ui_font(self.current_lang, _pt(9), bold=True))
         layout.addWidget(lbl_cond)
         _cond_previews = {
             "f_sumif":      lambda: f'={self.tr("f_sumif")}({self.br()};">10";{self.br()})',
@@ -1967,7 +1998,7 @@ class CalcFormelHelper(QMainWindow):
             date_grid.addWidget(btn, i // 4, i % 4)
         layout.addLayout(date_grid)
         lbl_text = QLabel(self.tr("sec_text"))
-        lbl_text.setFont(_ui_font(self.current_lang, 9, bold=True))
+        lbl_text.setFont(_ui_font(self.current_lang, _pt(9), bold=True))
         layout.addWidget(lbl_text)
         text_grid = QGridLayout()
         text_grid.setSpacing(4)
@@ -2018,7 +2049,7 @@ class CalcFormelHelper(QMainWindow):
             lambda: f'={self.tr("f_index")}({self.br2()};{self.tr("f_match")}({self.z1()};{self.br()};0))')
         layout.addWidget(btn_idxm)
         lbl_round = QLabel(self.tr("sec_round"))
-        lbl_round.setFont(_ui_font(self.current_lang, 9, bold=True))
+        lbl_round.setFont(_ui_font(self.current_lang, _pt(9), bold=True))
         layout.addWidget(lbl_round)
         math_grid = QGridLayout()
         math_grid.setSpacing(4)
@@ -2061,7 +2092,7 @@ class CalcFormelHelper(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(2)
         list_lbl = QLabel(self.tr("plugin_manager_list") or "Plugins")
-        list_lbl.setFont(_ui_font(self.current_lang, 9, bold=True))
+        list_lbl.setFont(_ui_font(self.current_lang, _pt(9), bold=True))
         left_layout.addWidget(list_lbl)
         self._plugin_list_widget = QListWidget()
         self._plugin_list_widget.setFixedWidth(170)
@@ -2125,7 +2156,7 @@ class CalcFormelHelper(QMainWindow):
         for kat_name, formeln in kategorien.items():
             # ── Kategorie-Label MIT Anzahl ──────────────────────────────────
             kat_lbl = QLabel(f"── {kat_name} ({len(formeln)}) ──")
-            kat_lbl.setFont(_ui_font(self.current_lang, 9, bold=True))
+            kat_lbl.setFont(_ui_font(self.current_lang, _pt(9), bold=True))
             kat_lbl.setStyleSheet(
                 f"color: {THEME.get('hl_function', '#4a90d9')};"
             )
@@ -2167,7 +2198,7 @@ class CalcFormelHelper(QMainWindow):
 
         formel_lbl = QLineEdit(formel_entry.formula)
         formel_lbl.setReadOnly(True)
-        formel_lbl.setFont(QFont(Config.FONT_MONO, 9))
+        formel_lbl.setFont(QFont(Config.FONT_MONO, _pt(9)))
         formel_lbl.setStyleSheet(
             "background: rgba(128,128,128,0.12);"
             "padding: 2px 6px; border-radius: 3px; border: none;"
@@ -2586,7 +2617,7 @@ class CalcFormelHelper(QMainWindow):
             val = self._get_example_vals(1)[0] ** 2
             return (self._expl("sqrt_cell", c1=c1, num=val) + "\n"
                     + self._expl("sqrt_desc") + "\n"
-                    + self._expl("sqrt_result", num=val, result=_math.isqrt(val)))
+                    + self._expl("sqrt_result", num=val, result=int(_math.sqrt(val))))
         elif func_canon == "f_rand":
             import random
             ex = f"{random.uniform(0, 1):.4f}"
@@ -2597,27 +2628,45 @@ class CalcFormelHelper(QMainWindow):
 
     def _update_explanation(self) -> None:
         if not hasattr(self, "_explanation_lbl"): return
-        plugin_tab_idx = getattr(self, "_plugin_tab_index", -1)
-        if plugin_tab_idx >= 0 and self.notebook.currentIndex() == plugin_tab_idx:
-            self._explanation_lbl.hide()
-            return
-        text = self._build_explanation(self.output_entry.toPlainText())
+        _scroll = getattr(self, "_explanation_scroll", None)
+        formula = self.output_entry.toPlainText()
+        text = self._build_explanation(formula)
+        lbl2 = getattr(self, "_explanation_lbl2", None)
         if text:
-            self._explanation_lbl.setText(text)
+            lines = [l for l in text.split("\n") if l.strip()]
+            # Alle Zeilen gleichmäßig auf genau 3 Reihen verteilen
+            # Aufteilung nach kumulierter Zeichenlänge → beide Hälften gleich breit
+            total = sum(len(l) for l in lines)
+            rows   = ["", "", ""]
+            thirds = [total / 3, 2 * total / 3]
+            running = 0
+            r = 0
+            for l in lines:
+                if r < 2 and running >= thirds[r]:
+                    r += 1
+                rows[r] = (rows[r] + "   │   " + l) if rows[r] else l
+                running += len(l)
+            display = "\n".join(row for row in rows if row)
+            self._explanation_lbl.setText(display)
             self._explanation_lbl.show()
+            if lbl2 is not None:
+                lbl2.hide()
+            if _scroll:
+                _scroll.show()
         else:
             self._explanation_lbl.hide()
+            if lbl2 is not None:
+                lbl2.hide()
+            if _scroll:
+                _scroll.hide()
 
-    # -----------------------------------------------------------------------
-    # Footer & Favoriten
-    # -----------------------------------------------------------------------
     def _setup_footer(self):
         lbl_out = QLabel(self.tr("lbl_gen_formel"))
-        lbl_out.setFont(_ui_font(self.current_lang, 10, bold=True))
+        lbl_out.setFont(_ui_font(self.current_lang, _pt(10), bold=True))
         self._root_layout.addWidget(lbl_out)
         out_row = QHBoxLayout()
         self.output_entry = QTextEdit()
-        self.output_entry.setFont(QFont(Config.FONT_OUTPUT, 11))
+        self.output_entry.setFont(QFont(Config.FONT_OUTPUT, _pt(11)))
         self.output_entry.setFixedHeight(Config.OUTPUT_H)
         self.output_entry.setLineWrapMode(QTextEdit.NoWrap)
         self.output_entry.setReadOnly(False)
@@ -2646,16 +2695,61 @@ class CalcFormelHelper(QMainWindow):
         btn_save.clicked.connect(self.formel_speichern)
         out_row.addWidget(btn_save)
         self._root_layout.addLayout(out_row)
-        self._explanation_lbl = QLabel("")
-        self._explanation_lbl.setFont(QFont(Config.FONT_MONO, 9))
-        self._explanation_lbl.setWordWrap(True)
-        self._explanation_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self._explanation_lbl.setStyleSheet(
-            "QLabel { color: #555555; padding: 4px 6px; "
-            "border-left: 3px solid #aaaaaa; margin-top: 2px; }"
+        # Erklärung: WordWrap an → Qt bricht an der Fensterbreite um,
+        # kein Fenster-Wachstum, kein Überlaufen
+        _expl_style = (
+            "QLabel { color: #555555; padding: 2px 6px; "
+            "border-left: 3px solid #aaaaaa; }"
         )
+        self._explanation_lbl = QLabel("")
+        self._explanation_lbl.setFont(QFont(Config.FONT_MONO, _pt(9)))
+        self._explanation_lbl.setWordWrap(False)        # jede Reihe bleibt eine Zeile
+        self._explanation_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self._explanation_lbl.setStyleSheet(_expl_style)
+        self._explanation_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self._explanation_lbl.setFixedHeight(_pt(9) * 5 + 12)  # 3 Zeilen + Padding
         self._explanation_lbl.hide()
+        self._explanation_scroll = None
+
+        # 🚨 HIER IST DIE SPERRE DIREKT IM ORIGINALEN LABEL 🚨
+        # Wir merken uns die echten Qt-Befehle
+        qt_original_setText = self._explanation_lbl.setText
+        qt_original_show = self._explanation_lbl.show
+
+        # Wir bauen eine Prüfung: Sind wir im Plugins-Tab?
+        def ist_plugin_aktiv():
+            if hasattr(self, "notebook"):
+                idx = self.notebook.currentIndex()
+                if idx >= 0:
+                    tab_text = self.notebook.tabText(idx).strip().lower()
+                    plugin_var_idx = getattr(self, "_plugin_tab_index", -1)
+                    # Wenn "plugin" im Namen steht oder der Index stimmt: JA!
+                    if "plugin" in tab_text or idx == plugin_var_idx:
+                        return True
+            return False
+
+        # Wir biegen den "Text-Schreiben" Befehl um
+        def sicheres_setText(text):
+            if ist_plugin_aktiv():
+                qt_original_setText("")  # Text sofort löschen
+                self._explanation_lbl.hide()  # Unsichtbar machen
+            else:
+                qt_original_setText(text)  # Normal schreiben in anderen Tabs
+
+        # Wir biegen den "Anzeigen" Befehl um
+        def sicheres_show():
+            if ist_plugin_aktiv():
+                self._explanation_lbl.hide()  # Bleibt versteckt
+            else:
+                qt_original_show()  # Normal anzeigen in anderen Tabs
+
+        # Jetzt überschreiben wir die Funktionen des Labels mit unseren sicheren Varianten
+        self._explanation_lbl.setText = sicheres_setText
+        self._explanation_lbl.show = sicheres_show
+        # ─────────────────────────────────────────────────────────────────
+
         self._root_layout.addWidget(self._explanation_lbl)
+        
         fav_group = QGroupBox(self.tr("fav_title"))
         fav_layout = QVBoxLayout(fav_group)
         fav_layout.setSpacing(4)
@@ -2673,7 +2767,7 @@ class CalcFormelHelper(QMainWindow):
         team_layout = QVBoxLayout(team_widget)
         team_layout.setContentsMargins(2, 2, 2, 2)
         self.team_listbox = QListWidget()
-        self.team_listbox.setFont(QFont(Config.FONT_MONO, 10))
+        self.team_listbox.setFont(QFont(Config.FONT_MONO, _pt(10)))
         self.team_listbox.setSelectionMode(QAbstractItemView.SingleSelection)
         self.team_listbox.itemDoubleClicked.connect(self._team_formel_laden)
         team_layout.addWidget(self.team_listbox)
@@ -2682,7 +2776,7 @@ class CalcFormelHelper(QMainWindow):
         eigene_layout = QVBoxLayout(eigene_widget)
         eigene_layout.setContentsMargins(2, 2, 2, 2)
         self.fav_listbox = QListWidget()
-        self.fav_listbox.setFont(QFont(Config.FONT_MONO, 10))
+        self.fav_listbox.setFont(QFont(Config.FONT_MONO, _pt(10)))
         self.fav_listbox.setSelectionMode(QAbstractItemView.SingleSelection)
         self.fav_listbox.setDragDropMode(QAbstractItemView.InternalMove)
         self.fav_listbox.setDefaultDropAction(Qt.MoveAction)
@@ -2694,7 +2788,7 @@ class CalcFormelHelper(QMainWindow):
         verlauf_layout = QVBoxLayout(verlauf_widget)
         verlauf_layout.setContentsMargins(2, 2, 2, 2)
         self.verlauf_listbox = QListWidget()
-        self.verlauf_listbox.setFont(QFont(Config.FONT_MONO, 10))
+        self.verlauf_listbox.setFont(QFont(Config.FONT_MONO, _pt(10)))
         self.verlauf_listbox.setSelectionMode(QAbstractItemView.SingleSelection)
         self.verlauf_listbox.installEventFilter(self)
         self.verlauf_listbox.itemDoubleClicked.connect(
@@ -2731,84 +2825,57 @@ class CalcFormelHelper(QMainWindow):
     def _on_lang_change(self, index: int):
         lang_codes = list(self.langs.keys())
         if index < 0 or index >= len(lang_codes): return
-        
-        # 1. Signale blockieren, um Python 3.8 Abstürze bei Widget-Zerstörung zu verhindern
-        self.blockSignals(True)
-        if hasattr(self, "highlighter") and self.highlighter is not None:
-            self.highlighter.blockSignals(True)
+        saved = {
+            "bereich":  self.bereich_entry.text(),
+            "bereich2": self.bereich2_entry.text(),
+            "z1":       self.zelle1_entry.text(),
+            "z2":       self.zelle2_entry.text(),
+            "param":    self.param_entry.text(),
+            "output":   self.output_entry.toPlainText(),
+            "ddl_z1":   self._ddl_z1.currentIndex(),
+            "ddl_z2":   self._ddl_z2.currentIndex(),
+            "ddl_br":   self._ddl_br.currentIndex(),
+            "ddl_br2":  self._ddl_br2.currentIndex(),
+        }
+        favs = self.favoriten[:]; verlauf = self._verlauf[:]
+        self.current_lang = lang_codes[index]
+        self.settings["language"] = self.current_lang
+        save_settings(self.settings)
+        if self.current_lang == "hi":
+            _ensure_hindi_font(QApplication.instance())
+        self.favoriten = favs; self._verlauf = verlauf
+        for plugin in self._plugins:
+            plugin.name        = get_plugin_text(plugin.raw_meta.get("name"),        self.current_lang, FALLBACK_LANG)
+            plugin.description = get_plugin_text(plugin.raw_meta.get("description"), self.current_lang, FALLBACK_LANG)
+            plugin.formulas    = resolve_formulas(plugin.raw_formulas, self.current_lang, FALLBACK_LANG)
+        central = QWidget()
+        self.setCentralWidget(central)
+        self._root_layout = QVBoxLayout(central)
+        self._root_layout.setContentsMargins(10, 10, 10, 10)
+        self._root_layout.setSpacing(6)
+        self._erstelle_ui()
+        self.bereich_entry.setText(saved["bereich"])
+        self.bereich2_entry.setText(saved["bereich2"])
+        self.zelle1_entry.setText(saved["z1"])
+        self.zelle2_entry.setText(saved["z2"])
+        self.param_entry.setText(saved["param"])
+        self.output_entry.setPlainText(saved["output"])
+        self._ddl_z1.setCurrentIndex(saved["ddl_z1"])
+        self._ddl_z2.setCurrentIndex(saved["ddl_z2"])
+        self._ddl_br.setCurrentIndex(saved["ddl_br"])
+        self._ddl_br2.setCurrentIndex(saved["ddl_br2"])
+        self._btn_dark.setText("☀️" if self._dark_mode else "🌙")
+        self.highlighter = FormulaHighlighter(
+            self.output_entry.document(),
+            functions=self._get_function_names()
+        )
+        self.highlighter.rehighlight()
+        self._update_fav_list()
+        self._update_history_list()
+        self._update_net_label()
+        _apply_font_to_app(QApplication.instance(), self.current_lang)
+        _apply_rtl_layout(self, self.current_lang)
 
-        try:
-            saved = {
-                "bereich":  self.bereich_entry.text(),
-                "bereich2": self.bereich2_entry.text(),
-                "z1":       self.zelle1_entry.text(),
-                "z2":       self.zelle2_entry.text(),
-                "param":    self.param_entry.text(),
-                "output":   self.output_entry.toPlainText(),
-                "ddl_z1":   self._ddl_z1.currentIndex(),
-                "ddl_z2":   self._ddl_z2.currentIndex(),
-                "ddl_br":   self._ddl_br.currentIndex(),
-                "ddl_br2":  self._ddl_br2.currentIndex(),
-            }
-            favs = self.favoriten[:]; verlauf = self._verlauf[:]
-            self.current_lang = lang_codes[index]
-            self.settings["language"] = self.current_lang
-            save_settings(self.settings)
-            
-            if self.current_lang == "hi":
-                _ensure_hindi_font(QApplication.instance())
-                
-            self.favoriten = favs; self._verlauf = verlauf
-            for plugin in self._plugins:
-                plugin.name        = get_plugin_text(plugin.raw_meta.get("name"),        self.current_lang, FALLBACK_LANG)
-                plugin.description = get_plugin_text(plugin.raw_meta.get("description"), self.current_lang, FALLBACK_LANG)
-                plugin.formulas    = resolve_formulas(plugin.raw_formulas, self.current_lang, FALLBACK_LANG)
-            
-            # Highlighter VOR setCentralWidget loslösen
-            if hasattr(self, "highlighter") and self.highlighter is not None:
-                self.highlighter.setDocument(None)
-                self.highlighter = None
-                
-            central = QWidget()
-            self.setCentralWidget(central)
-            
-            # WICHTIG FÜR PYTHON 3.8: Qt erlauben, die alten Widgets JETZT im Hintergrund zu löschen,
-            # bevor das neue UI gezeichnet wird. Das verhindert den Segfault!
-            QApplication.processEvents()
-            
-            self._root_layout = QVBoxLayout(central)
-            self._root_layout.setContentsMargins(10, 10, 10, 10)
-            self._root_layout.setSpacing(6)
-            
-            self._erstelle_ui()  # erstellt self.highlighter neu
-            
-            # Daten zurückschreiben
-            self.bereich_entry.setText(saved["bereich"])
-            self.bereich2_entry.setText(saved["bereich2"])
-            self.zelle1_entry.setText(saved["z1"])
-            self.zelle2_entry.setText(saved["z2"])
-            self.param_entry.setText(saved["param"])
-            self.output_entry.setPlainText(saved["output"])
-            self._ddl_z1.setCurrentIndex(saved["ddl_z1"])
-            self._ddl_z2.setCurrentIndex(saved["ddl_z2"])
-            self._ddl_br.setCurrentIndex(saved["ddl_br"])
-            self._ddl_br2.setCurrentIndex(saved["ddl_br2"])
-            self._btn_dark.setText("☀️" if self._dark_mode else "🌙")
-            
-            self._update_fav_list()
-            self._update_history_list()
-            self._update_net_label()
-            
-            _apply_font_to_app(QApplication.instance(), self.current_lang)
-            _apply_rtl_layout(self, self.current_lang)
-
-        finally:
-            # 2. Blockierung wieder aufheben und GUI final aktualisieren
-            self.blockSignals(False)
-            if hasattr(self, "highlighter") and self.highlighter is not None:
-                self.highlighter.blockSignals(False)
-                self.highlighter.rehighlight()
-            self.update()
     # -----------------------------------------------------------------------
     # Formel-Operationen
     # -----------------------------------------------------------------------
@@ -2891,46 +2958,27 @@ class CalcFormelHelper(QMainWindow):
     # Dark Mode
     # -----------------------------------------------------------------------
     def _toggle_dark_mode(self) -> None:
-        # 1. Signale blockieren, damit Python 3.8 beim Zeichnen nicht abstürzt
-        self.blockSignals(True)
-        if hasattr(self, "highlighter") and self.highlighter is not None:
-            self.highlighter.blockSignals(True)
+        self._dark_mode = not self._dark_mode
+        self.settings["dark_mode"] = self._dark_mode
+        save_settings(self.settings)
+        apply_theme(QApplication.instance(), self._dark_mode)
+        self._btn_dark.setText("☀️" if self._dark_mode else "🌙")
+        self.highlighter = FormulaHighlighter(
+            self.output_entry.document(),
+            functions=self._get_function_names()
+        )
+        self.highlighter.rehighlight()
+        self._update_net_label()
+        self._update_fav_list()
+        if hasattr(self, "_explanation_lbl"):
+            fg = "#bbbbbb" if self._dark_mode else "#555555"
+            border = "#666666" if self._dark_mode else "#aaaaaa"
+            self._explanation_lbl.setStyleSheet(
+                f"QLabel {{ color: {fg}; padding: 4px 6px; "
+                f"border-left: 3px solid {border}; margin-top: 2px; }}"
+            )
 
-        try:
-            self._dark_mode = not self._dark_mode
-            self.settings["dark_mode"] = self._dark_mode
-            save_settings(self.settings)
-            
-            apply_theme(QApplication.instance(), self._dark_mode)
-            self._btn_dark.setText("☀️" if self._dark_mode else "🌙")
-            
-            # Nur Farben aktualisieren – kein Neuerstellen
-            if hasattr(self, "highlighter") and self.highlighter is not None:
-                self.highlighter.refresh_rules(functions=self._get_function_names())
-            
-            self._update_net_label()
-            self._update_fav_list()
-            
-            if hasattr(self, "_explanation_lbl"):
-                fg = "#bbbbbb" if self._dark_mode else "#555555"
-                border = "#666666" if self._dark_mode else "#aaaaaa"
-                self._explanation_lbl.setStyleSheet(
-                    f"QLabel {{ color: {fg}; padding: 4px 6px; "
-                    f"border-left: 3px solid {border}; margin-top: 2px; }}"
-                )
-            
-            self._reapply_validation_styles()
-
-        finally:
-            # 2. Blockierung wieder aufheben und GUI sauber aktualisieren
-            if hasattr(self, "highlighter") and self.highlighter is not None:
-                self.highlighter.blockSignals(False)
-            self.blockSignals(False)
-            
-            # Erzwingt ein sicheres, verzögertes Neuzeichnen der GUI
-            self.update()
-            if hasattr(self, "highlighter") and self.highlighter is not None:
-                self.highlighter.rehighlight()
+        self._reapply_validation_styles()
 
     def _reapply_validation_styles(self) -> None:
         for field, check_fn in [
@@ -3323,19 +3371,32 @@ class CalcFormelHelper(QMainWindow):
 # Globaler Hotkey-Thread
 # ---------------------------------------------------------------------------
 class _GlobalHotkeyThread(QThread):
+    """Globaler Hotkey ⌥ Option + Leertaste (pynput). macOS: Bedienungshilfen erlauben."""
     triggered = pyqtSignal()
 
     def run(self):
         try:
-            import keyboard
-            keyboard.add_hotkey("ctrl+f12", self.triggered.emit, suppress=True)
-            keyboard.wait()
+            from pynput import keyboard as _kb
+            COMBO = {_kb.Key.alt, _kb.Key.space}
+            pressed: set = set()
+            def _on_press(key):
+                pressed.add(key)
+                if all(k in pressed for k in COMBO):
+                    self.triggered.emit()
+            def _on_release(key):
+                pressed.discard(key)
+            with _kb.Listener(on_press=_on_press, on_release=_on_release) as listener:
+                listener.join()
         except Exception:
             pass
 
 
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    import platform as _plat
+    if _plat.system() == "Darwin":
+        os.environ.setdefault("QT_MAC_WANTS_LAYER", "1")
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     window = CalcFormelHelper()
