@@ -75,7 +75,22 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # sys.path absichern: services/ muss neben Calc2.py liegen.
 # ---------------------------------------------------------------------------
-_here = Path(__file__).resolve().parent
+
+def _get_base_dir() -> Path:
+    """
+    Gibt immer den Ordner zurück wo Calc2.app / Calc2.py liegt.
+    Funktioniert als .py Script, als --onedir .app und als frozen App.
+    """
+    if getattr(sys, "frozen", False):
+        # PyInstaller --onedir:
+        # sys.executable = .../Calc2.app/Contents/MacOS/Calc2
+        # 3x .parent = Calc2_App/ (neben der .app)
+        return Path(sys.executable).resolve().parent.parent.parent.parent
+    else:
+        # Normaler Python-Start
+        return Path(__file__).resolve().parent
+
+_here = _get_base_dir()
 if not (_here / "services").exists():
     _env_base = os.environ.get("CALC2_BASE", "")
     if _env_base:
@@ -1340,15 +1355,31 @@ class CalcFormelHelper(QMainWindow):
             self._toggle_minimize(); return
         super().keyPressEvent(event)
 
-    def _toggle_minimize(self) -> None:
-        if self.isMinimized():
-            def _restore():
-                self.showNormal()
-                self.activateWindow()
-                self.raise_()
-                self.setFocus()
-            QTimer.singleShot(150, _restore)
+    def _toggle_minimize(self):
+        import time
+        from PyQt5 import QtCore
+
+        # 1. SCHUTZ VOR FLACKERN (Doppelklick-Schutz / Debounce)
+        # Ignoriert Signale, die innerhalb von 0.4 Sekunden doppelt ankommen
+        now = time.time()
+        if hasattr(self, '_last_toggle_time'):
+            if now - self._last_toggle_time < 0.4:
+                return  # Zu schnell gedrückt -> Befehl ignorieren
+        self._last_toggle_time = now
+
+        # 2. STATUS PRÜFEN & WINDOWS FOKUS ERZWINGEN
+        if self.isMinimized() or not self.isVisible():
+            # Setzt den Fensterzustand komplett zurück (entfernt "Minimiert")
+            self.setWindowState(QtCore.Qt.WindowNoState)
+            
+            # Fenster anzeigen und nach vorne holen
+            self.showNormal()
+            self.raise_()
+            
+            # Aktiviert das Fenster, damit du sofort tippen kannst
+            self.activateWindow()
         else:
+            # Wenn es offen ist -> sauber minimieren
             self.showMinimized()
 
     # -----------------------------------------------------------------------
@@ -3371,24 +3402,107 @@ class CalcFormelHelper(QMainWindow):
 # Globaler Hotkey-Thread
 # ---------------------------------------------------------------------------
 class _GlobalHotkeyThread(QThread):
-    """Globaler Hotkey ⌥ Option + Leertaste (pynput). macOS: Bedienungshilfen erlauben."""
+    """
+    Globaler Hotkey – plattformspezifisch:
+      Windows : Ctrl+F12  via keyboard-Bibliothek
+      macOS   : ⌥ Option + Leertaste  via pynput
+      Linux   : Ctrl+F12  via pynput (X11)
+    """
     triggered = pyqtSignal()
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._listener = None
+
+    def _emit(self):
+        """Thread-sicheres Auslösen des Signals."""
+        from PyQt5 import QtCore
+        QtCore.QMetaObject.invokeMethod(
+            self, "triggered", QtCore.Qt.QueuedConnection
+        )
+
     def run(self):
+        import platform as _plat
+        system = _plat.system()
+        if system == "Windows":
+            self._run_windows()
+        elif system == "Darwin":
+            self._run_mac()
+        else:
+            self._run_linux()
+
+    def _run_windows(self):
+        """Windows: keyboard-Bibliothek mit Ctrl+F12."""
+        try:
+            import keyboard as _keyboard
+            # Hotkey registrieren – thread-sicher über invokeMethod
+            _keyboard.add_hotkey("ctrl+f12", self._emit)
+            _keyboard.wait()   # blockiert bis Programm endet
+        except Exception:
+            # Fallback auf pynput
+            self._run_pynput_ctrl_f12()
+
+    def _run_mac(self):
+        """macOS: ⌥ Option + Leertaste via pynput."""
         try:
             from pynput import keyboard as _kb
             COMBO = {_kb.Key.alt, _kb.Key.space}
             pressed: set = set()
+
             def _on_press(key):
                 pressed.add(key)
                 if all(k in pressed for k in COMBO):
-                    self.triggered.emit()
+                    self._emit()
+
             def _on_release(key):
                 pressed.discard(key)
+
             with _kb.Listener(on_press=_on_press, on_release=_on_release) as listener:
+                self._listener = listener
                 listener.join()
         except Exception:
             pass
+
+    def _run_linux(self):
+        """Linux X11: Ctrl+F12 via pynput."""
+        self._run_pynput_ctrl_f12()
+
+    def _run_pynput_ctrl_f12(self):
+        """Ctrl+F12 via pynput – Linux und Windows-Fallback."""
+        try:
+            from pynput import keyboard as _kb
+            CTRL = {_kb.Key.ctrl_l, _kb.Key.ctrl_r}
+            pressed: set = set()
+
+            def _on_press(key):
+                pressed.add(key)
+                if any(k in pressed for k in CTRL) and key == _kb.Key.f12:
+                    self._emit()
+
+            def _on_release(key):
+                pressed.discard(key)
+
+            with _kb.Listener(on_press=_on_press, on_release=_on_release) as listener:
+                self._listener = listener
+                listener.join()
+        except Exception:
+            pass
+
+    def stop(self):
+        try:
+            if self._listener is not None:
+                self._listener.stop()
+        except Exception:
+            pass
+        try:
+            import platform as _plat
+            if _plat.system() == "Windows":
+                import keyboard as _keyboard
+                _keyboard.unhook_all()
+        except Exception:
+            pass
+        self.quit()
+        self.wait(1000)
 
 
 # ---------------------------------------------------------------------------
