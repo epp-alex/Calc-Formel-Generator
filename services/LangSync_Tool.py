@@ -1,6 +1,6 @@
 """
-LangSync Tool  –  Sprachcode-Abgleich aller JSON-Dateien gegen libreoffice_calc_translations.json
-Wird aus dem Calc2-Projektordner gestartet: python LangSync_Tool.py
+LangSync Tool – Language code sync against libreoffice_calc_translations.json
+Run from the Calc2 project folder: python LangSync_Tool.py python LangSync_Tool.py
 Nutzt PyQt5.
 
 Prüft:
@@ -112,7 +112,7 @@ class LangSyncTool(QDialog):
             FILE_LANG = LANG_DIR / "languages.json"
             FILE_EXPL = LANG_DIR / "formula_explanations.json"
             FILE_RTL  = LANG_DIR / "rtl_languages.json"
-        self.setWindowTitle("LangSync – Sprachcode Abgleich")
+        self.setWindowTitle("LangSync Tool  –  Language Code Sync")
         self.setMinimumSize(860, 600)
         self.resize(980, 680)
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
@@ -134,14 +134,14 @@ class LangSyncTool(QDialog):
 
         # ── Kopf ──────────────────────────────────────────────────────────────
         header = QLabel(
-            "<b>LangSync Tool</b> – Alle lokalen JSON-Dateien werden gegen "
-            "<code>libreoffice_calc_translations.json</code> abgeglichen."
+            "<b>LangSync Tool</b> – All local JSON files are cross-checked against "
+            "<code>libreoffice_calc_translations.json</code>."
         )
         header.setWordWrap(True)
         root.addWidget(header)
 
         # ── Pfad-Anzeige ──────────────────────────────────────────────────────
-        pbox = QGroupBox("Geprüfte Dateien")
+        pbox = QGroupBox("Verified Files")
         pbox_lay = QVBoxLayout(pbox)
         self._path_labels: Dict[str, QLabel] = {}
         for name, path in [
@@ -163,7 +163,7 @@ class LangSyncTool(QDialog):
 
         # ── Ergebnis-Baum ─────────────────────────────────────────────────────
         self._tree = QTreeWidget()
-        self._tree.setHeaderLabels(["Datei / Code", "Problem", "Ähnliche Codes im Master"])
+        self._tree.setHeaderLabels(["File / Code", "Issue", "Similar Codes in Master"])
         self._tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self._tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self._tree.header().setSectionResizeMode(2, QHeaderView.Stretch)
@@ -173,20 +173,20 @@ class LangSyncTool(QDialog):
         root.addWidget(self._tree, 1)
 
         # ── Aktionsbereich ────────────────────────────────────────────────────
-        act_box = QGroupBox("Aktion – Ausgewählten Code korrigieren")
+        act_box = QGroupBox("Action – Correct Selected Code")
         act_lay = QHBoxLayout(act_box)
 
-        self._lbl_selected = QLabel("Kein Code ausgewählt.")
+        self._lbl_selected = QLabel("No code selected.")
         self._lbl_selected.setFixedWidth(220)
         act_lay.addWidget(self._lbl_selected)
 
-        act_lay.addWidget(QLabel("Umbenennen zu:"))
+        act_lay.addWidget(QLabel("Rename to:"))
         self._inp_new = QLineEdit()
-        self._inp_new.setPlaceholderText("z.B.  pt-BR")
+        self._inp_new.setPlaceholderText("e.g.  pt-BR")
         self._inp_new.setFixedWidth(130)
         act_lay.addWidget(self._inp_new)
 
-        self._btn_rename = QPushButton("✔  In allen Dateien umbenennen")
+        self._btn_rename = QPushButton("✔  Rename in all files")
         self._btn_rename.setStyleSheet(
             "background:#2e7d32; color:white; font-weight:bold; padding:6px 14px;")
         self._btn_rename.setEnabled(False)
@@ -195,14 +195,14 @@ class LangSyncTool(QDialog):
 
         act_lay.addStretch()
 
-        self._btn_recheck = QPushButton("🔄  Erneut prüfen")
+        self._btn_recheck = QPushButton("🔄  Re-check")
         self._btn_recheck.clicked.connect(self._run_check)
         act_lay.addWidget(self._btn_recheck)
 
         root.addWidget(act_box)
 
         # ── Statuszeile ───────────────────────────────────────────────────────
-        self._status = QLabel("Wird geprüft …")
+        self._status = QLabel("Checking …")
         self._status.setStyleSheet("color:#555; font-size:11px;")
         root.addWidget(self._status)
 
@@ -213,13 +213,13 @@ class LangSyncTool(QDialog):
         self._issues.clear()
         self._inp_new.clear()
         self._btn_rename.setEnabled(False)
-        self._lbl_selected.setText("Kein Code ausgewählt.")
+        self._lbl_selected.setText("No code selected.")
 
-        # Master laden
+        # Load master
         lo_raw = _load(FILE_LO)
         if not lo_raw:
             self._status.setText(
-                f"❌  libreoffice_calc_translations.json nicht gefunden: {FILE_LO}")
+                f"❌  libreoffice_calc_translations.json not found: {FILE_LO}")
             return
         self._lo_data  = lo_raw
         self._lo_codes = _lo_lang_codes(lo_raw)
@@ -227,8 +227,8 @@ class LangSyncTool(QDialog):
         checks = [
             ("languages.json",       FILE_LANG,  "dict"),
             ("formula_explanations", FILE_EXPL,  "dict"),
-            # rtl_languages.json wird NICHT gegen LO-Master geprüft –
-            # sie definiert nur Schriftrichtung, nicht LO-Sprachunterstützung.
+            # rtl_languages.json is NOT checked against LO master –
+            # it only defines text direction, not LO language support.
         ]
 
         total_issues = 0
@@ -236,7 +236,7 @@ class LangSyncTool(QDialog):
         for label, path, kind in checks:
             data = _load(path)
             if data is None:
-                item = QTreeWidgetItem(self._tree, [label, "⚠️  Datei nicht gefunden", ""])
+                item = QTreeWidgetItem(self._tree, [label, "⚠️  File not found", ""])
                 item.setForeground(1, QColor("#e65100"))
                 continue
 
@@ -248,14 +248,13 @@ class LangSyncTool(QDialog):
             not_in_master = sorted(local_codes - self._lo_codes)
 
             if not not_in_master:
-                item = QTreeWidgetItem(self._tree, [label, "✅  Alle Codes OK", ""])
+                item = QTreeWidgetItem(self._tree, [label, "✅  All codes OK", ""])
                 item.setForeground(1, QColor("#2e7d32"))
                 continue
 
             parent = QTreeWidgetItem(self._tree,
                 [label,
-                 f"⚠️  {len(not_in_master)} Code(s) nicht im Master",
-                 ""])
+                 f"⚠️  {len(not_in_master)} code(s) not in Master", ""])
             parent.setForeground(1, QColor("#c62828"))
             fnt = parent.font(0)
             fnt.setBold(True)
@@ -265,10 +264,10 @@ class LangSyncTool(QDialog):
                 similar = _similar(code, self._lo_codes)
                 sim_str = ",  ".join(similar) if similar else "–"
                 child = QTreeWidgetItem(parent,
-                    [f"  {code}", "Nicht in LO gefunden", sim_str])
+                    [f"  {code}", "Not found in LO", sim_str])
                 child.setForeground(1, QColor("#c62828"))
                 child.setForeground(2, QColor("#1565c0"))
-                # Metadaten für Aktion
+                # Metadata for action
                 child.setData(0, Qt.UserRole, {
                     "code":    code,
                     "file":    path,
@@ -283,12 +282,12 @@ class LangSyncTool(QDialog):
 
         if total_issues == 0:
             self._status.setText(
-                f"✅  Alle Codes in allen Dateien stimmen mit dem Master überein. "
-                f"({len(self._lo_codes)} Codes im Master)")
+                f"✅  All codes in all files match the master. "
+                f"({len(self._lo_codes)} codes in Master)")
         else:
             self._status.setText(
-                f"⚠️  {total_issues} Problem(e) gefunden.  "
-                f"Code auswählen → neuen Code eingeben → Umbenennen.")
+                f"⚠️  {total_issues} issue(s) found.  "
+                f"Select a code → enter new code → Rename.")
 
     # ── Auswahl ───────────────────────────────────────────────────────────────
 
@@ -296,26 +295,26 @@ class LangSyncTool(QDialog):
         items = self._tree.selectedItems()
         if not items:
             self._btn_rename.setEnabled(False)
-            self._lbl_selected.setText("Kein Code ausgewählt.")
+            self._lbl_selected.setText("No code selected.")
             return
         item = items[0]
         meta = item.data(0, Qt.UserRole)
         if not meta:
             self._btn_rename.setEnabled(False)
-            self._lbl_selected.setText("Bitte einen Code-Eintrag wählen.")
+            self._lbl_selected.setText("Please select a code entry.")
             return
 
         code    = meta["code"]
         similar = meta["similar"]
         self._selected_meta = meta
-        self._lbl_selected.setText(f"Ausgewählt:  <b>{code}</b>")
+        self._lbl_selected.setText(f"Selected::  <b>{code}</b>")
         self._btn_rename.setEnabled(True)
 
-        # Ähnlichsten Code vorschlagen
+        # Suggest closest match
         if similar:
-            self._inp_new.setPlaceholderText(f"z.B.  {similar[0]}")
+            self._inp_new.setPlaceholderText(f"e.g.  {similar[0]}")
         else:
-            self._inp_new.setPlaceholderText("Neuer Code …")
+            self._inp_new.setPlaceholderText("New code …")
 
     # ── Umbenennen ────────────────────────────────────────────────────────────
 
@@ -328,29 +327,29 @@ class LangSyncTool(QDialog):
         new_code = self._inp_new.text().strip()
 
         if not new_code:
-            QMessageBox.warning(self, "Kein Code", "Bitte neuen Code eingeben.")
+            QMessageBox.warning(self, "No code", "Please enter a new code.")
             return
 
         if new_code == old_code:
-            QMessageBox.information(self, "Gleich", "Alter und neuer Code sind identisch.")
+            QMessageBox.information(self, "No change", "Old and new code are identical.")
             return
 
-        # Prüfen ob neuer Code im Master existiert
+        # Check if new code exists in master
         if self._lo_codes and new_code not in self._lo_codes:
             similar = _similar(new_code, self._lo_codes)
-            hint = f"\n\nÄhnliche Codes im Master: {', '.join(similar)}" if similar else ""
-            ans = QMessageBox.warning(self, "⚠️  Neuer Code nicht im Master",
-                f'"{new_code}" ist AUCH nicht in libreoffice_calc_translations.json.{hint}\n\n'
-                f'Trotzdem umbenennen?',
+            hint = f"\n\nSimilar codes in Master: {', '.join(similar)}" if similar else ""
+            ans = QMessageBox.warning(self, "⚠️  New code not in Master",
+                f'"{new_code}" is ALSO not in libreoffice_calc_translations.json.{hint}\n\n'
+                f'Rename anyway?',
                 QMessageBox.Yes | QMessageBox.No)
             if ans != QMessageBox.Yes:
                 return
 
-        # Bestätigung
-        ans = QMessageBox.question(self, "Umbenennen bestätigen",
+        # Confirmation
+        ans = QMessageBox.question(self, "Confirm rename",
             f'Code  "{old_code}"  →  "{new_code}"\n\n'
-            f'wird in ALLEN JSON-Dateien umbenannt.\n'
-            f'Fortfahren?',
+            f'will be renamed in ALL JSON files.\n'
+            f'Proceed?',
             QMessageBox.Yes | QMessageBox.No)
         if ans != QMessageBox.Yes:
             return
@@ -393,16 +392,16 @@ class LangSyncTool(QDialog):
 
         # ── Ergebnis ──────────────────────────────────────────────────────────
         if errors:
-            QMessageBox.critical(self, "Fehler",
-                "Folgende Dateien konnten nicht gespeichert werden:\n\n" +
+            QMessageBox.critical(self, "Error",
+                "The following files could not be saved:\n\n" +
                 "\n".join(errors))
         else:
-            summary = "\n".join(f"  ✅  {f}" for f in changed) if changed else "  (keine Änderungen)"
-            QMessageBox.information(self, "Fertig",
-                f'"{old_code}"  wurde umbenannt zu  "{new_code}"\n\n'
-                f'Geänderte Dateien:\n{summary}')
+            summary = "\n".join(f"  ✅  {f}" for f in changed) if changed else "  (no changes)"
+            QMessageBox.information(self, "Done",
+                f'"{old_code}"  was renamed to  "{new_code}"\n\n'
+                f'Changed files:\n{summary}')
 
-        # Neu prüfen
+        # Re-check
         self._run_check()
 
 

@@ -3,7 +3,7 @@
 """
 LibreOffice Calc Formel Helper
 ─────────────────────────────────────────────────────────────────────────────
-Version:  1.0.2  |  Datum: 2026-05-27
+Version:  1.0.3  |  Datum: 2026-05-27
 ─────────────────────────────────────────────────────────────────────────────
 Datei-Struktur:
 
@@ -75,8 +75,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # sys.path absichern: services/ muss neben Calc2.py liegen.
 # ---------------------------------------------------------------------------
-
-def _get_base_dir() -> Path:
+def _get_base_dir():
     """
     Gibt immer den Ordner zurück wo Calc2.app / Calc2.py liegt.
     Funktioniert als .py Script, als --onedir .app und als frozen App.
@@ -99,10 +98,15 @@ if not (_here / "services").exists():
 if str(_here) not in sys.path:
     sys.path.insert(0, str(_here))
 
-from PyQt5.QtCore import QMimeData, QObject, Qt, QTimer, QThread, pyqtSignal
+from PyQt5.QtCore import (
+    QMimeData, QObject, Qt,
+    QTimer, QThread, pyqtSignal,
+    QSize
+)
 from PyQt5.QtGui import (
     QBrush, QColor, QFont, QPalette,
-    QSyntaxHighlighter, QTextCharFormat, QFontDatabase,
+    QSyntaxHighlighter, QTextCharFormat,
+    QFontDatabase, QIcon
 )
 from PyQt5.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog,
@@ -110,24 +114,58 @@ from PyQt5.QtWidgets import (
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
     QSplitter, QStackedWidget, QStatusBar, QTabWidget, QTextEdit,
-    QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget
 )
 
 # ---------------------------------------------------------------------------
 # Services  (Business-Logik, UI-unabhängig)
 # ---------------------------------------------------------------------------
+
 from services.settings_service import (
-    APP_NAME, FALLBACK_LANG, FALLBACK_MESSAGES,
-    Config, THEME, THEME_LIGHT, THEME_DARK,
-    RESOURCE_DIR, DATA_DIR,
-    LANG_FILE, SETTINGS_FILE, FAV_FILE, HISTORY_FILE, ADMIN_FILE,
-    get_app_data_dir, get_resource_dir,
-    atomic_write, log_exc as _log_exc, _get_logger,
-    load_settings, save_settings,
+    APP_NAME, FALLBACK_LANG, FALLBACK_MESSAGES, Config, THEME, THEME_LIGHT, THEME_DARK,
+    RESOURCE_DIR, DATA_DIR, LANG_FILE, SETTINGS_FILE, FAV_FILE, HISTORY_FILE, ADMIN_FILE,
+    get_app_data_dir, get_resource_dir, atomic_write, log_exc as _log_exc, _get_logger,
+    load_settings, save_settings
 )
+
+# ── Flag-Icons für Sprachauswahl ───────────────────────────────────────────
+def _get_flag_icon(lang_code, base_dir):
+    """
+    Gibt das Flag-Icon für einen Sprachcode zurück.
+    PNG-Dateien liegen in assets/flags/<country_code>.png (64x64).
+    Mapping für Sprachcodes die nicht dem Ländercode entsprechen.
+    """
+    mapping = {
+        "en":    "us",
+        "cs":    "cz",
+        "da":    "dk",
+        "el":    "gr",
+        "nn":    "no",
+        "nb":    "no",
+        "uk":    "ua",
+        "zh":    "cn",
+        "zh-CN": "cn",
+        "ja":    "jp",
+        "ko":    "kr",
+        "hi":    "in",
+        "pt-BR": "br",
+        "pt_BR": "br",
+        "he":    "il",
+        "fa":    "ir",
+    }
+    country = mapping.get(lang_code, lang_code)
+    flag_path = Path(str(base_dir)) / "assets" / "flags" / f"{country}.png"
+    if flag_path.exists():
+        from PyQt5.QtGui import QIcon
+        return QIcon(str(flag_path))
+    return None
+
+# ---------------------------------------------------------------------------
+# Authentifizierungs-Service (Admin-Funktionen)
+# ---------------------------------------------------------------------------
 from services.auth_service import (
     admin_password_is_set, check_admin_password,
-    set_admin_password, load_admin_config, save_admin_config,
+    set_admin_password, load_admin_config, save_admin_config
 )
 from services.favorites_service import (
     Favorite,
@@ -396,8 +434,8 @@ def _apply_font_to_app(app, lang_code):
         app.setFont(QFont("Segoe UI", _pt(9)))
 
 # ---------------------------------------------------------------------------
-APP_VERSION      = "1.0.1"
-APP_VERSION_DATE = "2025-05-08"
+APP_VERSION      = "1.0.3"
+APP_VERSION_DATE = "2026-06-02"
 
 # ---------------------------------------------------------------------------
 # Pfad zum language/-Ordner
@@ -505,7 +543,15 @@ def load_languages() -> dict:
         return {}
     try:
         raw = json.loads(LANG_FILE.read_text(encoding="utf-8"))
-        return {k: v for k, v in raw.items() if not k.startswith("_")}
+        languages_dict = {k: v for k, v in raw.items() if not k.startswith("_")}
+        
+        # Schneidet "DE - " oder "EN - " automatisch aus der Anzeige heraus
+        import re
+        for lang_code, lang_data in languages_dict.items():
+            if isinstance(lang_data, dict) and "_meta" in lang_data and "name" in lang_data["_meta"]:
+                lang_data["_meta"]["name"] = re.sub(r'\b[A-Z]{2,3}\s*-\s*', '', lang_data["_meta"]["name"])
+                
+        return languages_dict
     except json.JSONDecodeError as e:
         title = lang.get("msg_langfile_invalid_title", FALLBACK_MESSAGES["msg_langfile_invalid_title"])
         body  = lang.get("msg_langfile_invalid_body",  FALLBACK_MESSAGES["msg_langfile_invalid_body"]
@@ -793,14 +839,42 @@ class AdminPanelDialog(QDialog):
         self._refresh_list()
 
     def _refresh_list(self):
+        import os
+        from PyQt5.QtGui import QIcon, QPixmap, QBrush, QColor
+        from PyQt5.QtCore import QSize, Qt
+        from PyQt5.QtWidgets import QListWidgetItem
+
         self._list.clear()
+        
+        # Pfad zu deinem Team-Icon ermitteln
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        team_icon_path = os.path.join(base_dir, "Icon", "Team.png")
+        
+        # Icon-Größe für dieses Listenfeld festlegen (14x14)
+        self._list.setIconSize(QSize(14, 14))
+
         for e in self._entries:
-            prefix  = "👥" if e.team else "⭐"
-            display = f"{prefix}  {e.label + '  │  ' if e.label else ''}{e.formel}"
-            item = QListWidgetItem(display)
+            # Das Prefix ist jetzt komplett sauber ohne Emojis!
+            if e.team:
+                display = f"{e.label + '  │  ' if e.label else ''}{e.formel}"
+            else:
+                display = f"⭐  {e.label + '  │  ' if e.label else ''}{e.formel}"
+                
+            # 1. Wir laden das Icon VORHER in eine Variable, damit wir es prüfen können
+            icon_obj = QIcon()
+            if e.team and os.path.exists(team_icon_path):
+                # Wir erstellen ein sauberes Icon aus dem Pfad
+                icon_obj = QIcon(team_icon_path)
+
+            # 2. Wir übergeben das Icon DIREKT beim Erstellen des Items
+            item = QListWidgetItem(icon_obj, display)
+            
+            # 3. Danach setzen wir den Rest
             item.setData(Qt.UserRole, e.formel)
+            
             if e.team:
                 item.setForeground(QBrush(QColor(THEME["ui_team_fg"])))
+                
             self._list.addItem(item)
 
     def _on_select(self, row: int):
@@ -1296,6 +1370,10 @@ class NetPathDialog(QDialog):
 # Haupt-Fenster
 # ---------------------------------------------------------------------------
 class CalcFormelHelper(QMainWindow):
+    def _icon(self, filename):
+        p = _here / "Icon" / filename
+        return QIcon(str(p)) if p.exists() else QIcon()
+
     def __init__(self):
         super().__init__()
         self.resize(1024, 950)
@@ -1618,6 +1696,7 @@ class CalcFormelHelper(QMainWindow):
     # UI aufbauen
     # -----------------------------------------------------------------------
     def _erstelle_ui(self) -> None:
+        from PyQt5.QtCore import QSize
         self.setWindowTitle(f"{self.tr('win_title')}  v{APP_VERSION}")
         header = QHBoxLayout()
         header.setSpacing(6)
@@ -1626,56 +1705,112 @@ class CalcFormelHelper(QMainWindow):
         header.addWidget(title_lbl)
         header.addStretch()
         if getattr(sys, "frozen", False):
-            btn_link = QPushButton("🔗")
+            btn_link = QPushButton(); btn_link.setIcon(self._icon("saved.png")); btn_link.setIconSize(QSize(24,24))
             btn_link.setFixedWidth(Config.ICON_BTN_W)
             btn_link.setToolTip(self.tr("tooltip_repair_link"))
             btn_link.clicked.connect(self._repair_shortcut)
             header.addWidget(btn_link)
-        btn_plugin_mgr = QPushButton("🔌")
+        btn_plugin_mgr = QPushButton(); btn_plugin_mgr.setIcon(self._icon("Plagin_Manager.png")); btn_plugin_mgr.setIconSize(QSize(20,20))
         btn_plugin_mgr.setFixedWidth(Config.ICON_BTN_W)
         btn_plugin_mgr.setToolTip("Plugin Manager")
         btn_plugin_mgr.clicked.connect(self._open_plugin_manager)
         header.addWidget(btn_plugin_mgr)
-        btn_backup = QPushButton("💾")
+        btn_backup = QPushButton(); btn_backup.setIcon(self._icon("backup.png")); btn_backup.setIconSize(QSize(20,20))
         btn_backup.setFixedWidth(Config.ICON_BTN_W)
         btn_backup.setToolTip("Backup")
         btn_backup.clicked.connect(self._open_backup)
         header.addWidget(btn_backup)
-        btn_restore = QPushButton("🔄")
+        btn_restore = QPushButton(); btn_restore.setIcon(self._icon("restore.png")); btn_restore.setIconSize(QSize(20,20))
         btn_restore.setFixedWidth(Config.ICON_BTN_W)
         btn_restore.setToolTip("Restore")
         btn_restore.clicked.connect(self._open_restore)
         header.addWidget(btn_restore)
-        btn_lang_tool = QPushButton("🌍")
+        btn_lang_tool = QPushButton(); btn_lang_tool.setIcon(self._icon("language.png")); btn_lang_tool.setIconSize(QSize(20,20))
         btn_lang_tool.setFixedWidth(Config.ICON_BTN_W)
         btn_lang_tool.setToolTip("Add new language")
         btn_lang_tool.clicked.connect(self._open_language_tool)
         header.addWidget(btn_lang_tool)
-        btn_lang_sync = QPushButton("🔍")
+        btn_lang_sync = QPushButton(); btn_lang_sync.setIcon(self._icon("Control_Language.png")); btn_lang_sync.setIconSize(QSize(20,20))
         btn_lang_sync.setFixedWidth(Config.ICON_BTN_W)
         btn_lang_sync.setToolTip("Language code sync check")
         btn_lang_sync.clicked.connect(self._open_lang_sync)
         header.addWidget(btn_lang_sync)
-        self._btn_dark = QPushButton("🌙" if not self._dark_mode else "☀️")
+        self._btn_dark = QPushButton()
+        self._btn_dark.setIcon(self._icon("brightness.png" if self._dark_mode else "Dark_Mode.png"))
+        self._btn_dark.setIconSize(QSize(20, 20))
         self._btn_dark.setFixedWidth(Config.ICON_BTN_W)
         self._btn_dark.setToolTip(self.tr("tooltip_dark_mode"))
         self._btn_dark.clicked.connect(self._toggle_dark_mode)
         header.addWidget(self._btn_dark)
-        btn_admin = QPushButton("🛠")
+        btn_admin = QPushButton(); btn_admin.setIcon(self._icon("admin_Panel.png")); btn_admin.setIconSize(QSize(20,20))
         btn_admin.setFixedWidth(Config.ICON_BTN_W)
         btn_admin.setToolTip(self.tr("tooltip_admin_panel"))
         btn_admin.clicked.connect(self._open_admin_panel)
         header.addWidget(btn_admin)
-        btn_ref = QPushButton(self.tr("btn_ref"))
+        # ─── 1. REFERENZ-BUTTON (REINES ICON, KEIN TEXT/EMOJI NEBENDRAN) ───
+        btn_ref = QPushButton()  # Klammern komplett LEER lassen!
+        
+        import os
+        from PyQt5.QtGui import QIcon, QPixmap
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        ref_icon_path = os.path.join(base_dir, "Icon", "Referenz.png")
+        if os.path.exists(ref_icon_path):
+            btn_ref.setIcon(QIcon(QPixmap(ref_icon_path)))
+            btn_ref.setIconSize(QSize(20, 20))
+            
+        btn_ref.setFixedWidth(Config.ICON_BTN_W)  # Gleiche Breite wie die anderen Knöpfe
+        btn_ref.setToolTip(self.tr("btn_ref"))     # Der Text wird zum eleganten Tooltip!
         btn_ref.clicked.connect(self.zeige_referenz)
         header.addWidget(btn_ref)
-        btn_help = QPushButton(self.tr("btn_help"))
+
+        # ─── 2. HILFE-BUTTON (REINES ICON, KEIN TEXT/EMOJI NEBENDRAN) ───
+        btn_help = QPushButton()  # Klammern komplett LEER lassen!
+        
+        help_icon_path = os.path.join(base_dir, "Icon", "help.png")
+        if os.path.exists(help_icon_path):
+            btn_help.setIcon(QIcon(QPixmap(help_icon_path)))
+            btn_help.setIconSize(QSize(20, 20))
+            
+        btn_help.setFixedWidth(Config.ICON_BTN_W)
+        btn_help.setToolTip(self.tr("btn_help"))   # Der Text wird zum eleganten Tooltip!
         btn_help.clicked.connect(self.zeige_hilfe)
         header.addWidget(btn_help)
         lang_codes = list(self.langs.keys())
         lang_names = [self.langs[c]["_meta"]["name"] for c in lang_codes]
         self.lang_combo = QComboBox()
-        self.lang_combo.addItems(lang_names)
+        mapping = {
+            "en": "us",    "cs": "cz",    "da": "dk",    "el": "gr",
+            "nn": "no",    "nb": "no",    "uk": "ua",    "zh-CN": "cn",
+            "ja": "jp",    "ko": "kr",    "hi": "in",    "pt-BR": "br",
+            "he": "il",    "fa": "ir"
+        }
+        # Pfad zu deinen Flaggen-Bildern (Ordner: assets/flags/)
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # --- BEHEBT DEN NAME-ERROR: Importiert QPixmap und QIcon direkt hier ---
+        from PyQt5.QtGui import QPixmap, QIcon
+        import re
+        
+        # Dynamische Suche nach Bildern
+        for code in lang_codes:
+            image_code = mapping.get(code, code)
+            name = self.langs[code]["_meta"]["name"]
+            
+            # Filtert das "DE" oder "EN" sicher heraus, BEVOR es hinzugefügt wird
+            display_name = re.sub(r'^\s*[A-Z]{2,3}\s*-\s*|\b[A-Z]{2,3}\b\s*', '', name).strip()
+            
+            icon_path = os.path.join(base_dir, "assets", "flags", f"{image_code}.png")
+            if os.path.exists(icon_path):
+                pixmap = QPixmap(icon_path)
+                icon = QIcon(pixmap)
+            else:
+                # Fallback: Falls mal ein Bild fehlt, leeres Icon
+                icon = QIcon() 
+            
+            # Jetzt wird der fertig gesäuberte Name hinzugefügt
+            self.lang_combo.addItem(icon, display_name)
+                
         current_idx = lang_codes.index(self.current_lang) if self.current_lang in lang_codes else 0
         self.lang_combo.setCurrentIndex(current_idx)
         self.lang_combo.setFixedWidth(Config.LANG_COMBO_W)
@@ -2144,7 +2279,7 @@ class CalcFormelHelper(QMainWindow):
         splitter.setStretchFactor(1, 1)
         outer.addWidget(splitter)
         self._plugin_tab_index = self.notebook.count()
-        self.notebook.addTab(container, self.tr("plugin_manager_tab") or "🔌 Plugins")
+        self.notebook.addTab(container, self._icon("Plugin.png"), self.tr("plugin_manager_tab") or "Plugins")
         self._plugin_list_widget.setCurrentRow(0)
         self._plugin_list_widget.currentRowChanged.connect(
             self._plugin_stack.setCurrentIndex
@@ -2720,9 +2855,11 @@ class CalcFormelHelper(QMainWindow):
         self._btn_redo.clicked.connect(self._redo)
         out_row.addWidget(self._btn_redo)
         self._btn_copy = QPushButton(self.tr("btn_copy"))
+        self._btn_copy.setIcon(self._icon("copy.png"))
         self._btn_copy.clicked.connect(self.kopieren)
         out_row.addWidget(self._btn_copy)
         btn_save = QPushButton(self.tr("btn_save"))
+        btn_save.setIcon(self._icon("saved.png"))
         btn_save.clicked.connect(self.formel_speichern)
         out_row.addWidget(btn_save)
         self._root_layout.addLayout(out_row)
@@ -2802,7 +2939,8 @@ class CalcFormelHelper(QMainWindow):
         self.team_listbox.setSelectionMode(QAbstractItemView.SingleSelection)
         self.team_listbox.itemDoubleClicked.connect(self._team_formel_laden)
         team_layout.addWidget(self.team_listbox)
-        self.fav_tabs.addTab(team_widget, self.tr("fav_tab_team"))
+        # Fügt den Tab mit dem Team.png und dem korrekten Namen aus der JSON-Datei hinzu
+        self.fav_tabs.addTab(self.team_listbox, self._icon("Team.png"), self.tr("adm_form_team"))
         eigene_widget = QWidget()
         eigene_layout = QVBoxLayout(eigene_widget)
         eigene_layout.setContentsMargins(2, 2, 2, 2)
@@ -2814,7 +2952,7 @@ class CalcFormelHelper(QMainWindow):
         self.fav_listbox.model().rowsMoved.connect(self._on_fav_rows_moved)
         self.fav_listbox.installEventFilter(self)
         eigene_layout.addWidget(self.fav_listbox)
-        self.fav_tabs.addTab(eigene_widget, "⭐ " + self.tr("fav_title"))
+        self.fav_tabs.addTab(eigene_widget, self._icon("Formul_saved.png"), self.tr("fav_title"))
         verlauf_widget = QWidget()
         verlauf_layout = QVBoxLayout(verlauf_widget)
         verlauf_layout.setContentsMargins(2, 2, 2, 2)
@@ -2826,7 +2964,7 @@ class CalcFormelHelper(QMainWindow):
             lambda item: self.set_o(item.data(Qt.UserRole))
         )
         verlauf_layout.addWidget(self.verlauf_listbox)
-        self.fav_tabs.addTab(verlauf_widget, "🕐 " + self.tr("tab_history"))
+        self.fav_tabs.addTab(verlauf_widget, self._icon("history.png"), self.tr("tab_history"))
         fav_layout.addWidget(self.fav_tabs)
         fav_btns = QHBoxLayout()
         btn_load = QPushButton(self.tr("btn_load"))
@@ -2895,7 +3033,7 @@ class CalcFormelHelper(QMainWindow):
         self._ddl_z2.setCurrentIndex(saved["ddl_z2"])
         self._ddl_br.setCurrentIndex(saved["ddl_br"])
         self._ddl_br2.setCurrentIndex(saved["ddl_br2"])
-        self._btn_dark.setText("☀️" if self._dark_mode else "🌙")
+        #self._btn_dark.setText("☀️" if self._dark_mode else "🌙")
         self.highlighter = FormulaHighlighter(
             self.output_entry.document(),
             functions=self._get_function_names()
@@ -2993,7 +3131,15 @@ class CalcFormelHelper(QMainWindow):
         self.settings["dark_mode"] = self._dark_mode
         save_settings(self.settings)
         apply_theme(QApplication.instance(), self._dark_mode)
-        self._btn_dark.setText("☀️" if self._dark_mode else "🌙")
+        
+        # --- KORREKTUR: Emojis wegmachen und Icons live umschalten ---
+        if hasattr(self, '_btn_dark'):
+            # Text leeren, damit keine Emojis mehr angezeigt werden
+            self._btn_dark.setText("") 
+            # Das passende PNG-Bild für den aktuellen Modus setzen
+            neues_icon = "brightness.png" if self._dark_mode else "Dark_Mode.png"
+            self._btn_dark.setIcon(self._icon(neues_icon))
+        
         self.highlighter = FormulaHighlighter(
             self.output_entry.document(),
             functions=self._get_function_names()
@@ -3112,7 +3258,18 @@ class CalcFormelHelper(QMainWindow):
         # und dabei die aktuelle Sprache auf den ersten Eintrag zurücksetzen.
         self.lang_combo.blockSignals(True)
         self.lang_combo.clear()
-        self.lang_combo.addItems(lang_names)
+        
+        import re
+        for code, name in zip(lang_codes, lang_names):
+            # FILTER: Löscht das pure "DE" oder "EN", falls es im Text klebt,
+            # lässt aber das Flaggen-Emoji und den Namen (Deutsch) komplett ganz!
+            clean_name = re.sub(r'\b[A-Z]{2}\b\s*', '', name).strip()
+            
+            icon = _get_flag_icon(code, _here)
+            if icon:
+                self.lang_combo.addItem(icon, clean_name)
+            else:
+                self.lang_combo.addItem(clean_name)
         idx = lang_codes.index(self.current_lang) if self.current_lang in lang_codes else 0
         self.lang_combo.setCurrentIndex(idx)
         self.lang_combo.blockSignals(False)
@@ -3176,20 +3333,44 @@ class CalcFormelHelper(QMainWindow):
     # Favoriten – Anzeige
     # -----------------------------------------------------------------------
     def _update_fav_list(self):
+        import os
+        from PyQt5.QtGui import QIcon, QPixmap, QBrush, QColor
+        from PyQt5.QtCore import QSize, Qt
+        from PyQt5.QtWidgets import QListWidgetItem
+
+        # 1. Bildgröße für die Liste auf 14x14 festlegen
+        self.team_listbox.setIconSize(QSize(14, 14))
         self.team_listbox.clear()
-        self.fav_listbox.clear()
+
+        # Pfad zu deinem Team-Icon ermitteln
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        team_icon_path = os.path.join(base_dir, "Icon", "Team.png")
+
         for entry in self.favoriten:
-            formel = entry.formel; label = entry.label; is_team = entry.team
-            display = f"[TEAM]  {label + '  ' if label else ''}{formel}" if is_team else (
-                      f"{label}  {formel}" if label else formel)
+            formel = entry.formel
+            label = entry.label
+            is_team = entry.team
+            
+            # 2. Text-Formatierung anpassen (Das alte Text-Symbol komplett entfernt!)
+            display = f"{label + '   ' if label else ''}{formel}" if is_team else (
+                f"{label} {formel}" if label else formel)
+            
             item = QListWidgetItem(display)
             item.setData(Qt.UserRole, formel)
+            
             if is_team:
                 item.setForeground(QBrush(QColor(THEME["ui_team_fg"])))
                 item.setToolTip(self.tr("fav_team_tooltip"))
-                self.team_listbox.addItem(item)
-            else:
-                self.fav_listbox.addItem(item)
+                
+                # 3. Wenn die PNG-Datei existiert, laden wir sie als sauberes Icon vor den Eintrag
+                if os.path.exists(team_icon_path):
+                    pixmap = QPixmap(team_icon_path)
+                    # Hier erzwingen wir die 14x14 Skalierung, 
+                    # egal wie groß das Quellbild ist:
+                    scaled_pixmap = pixmap.scaled(14, 14, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    item.setIcon(QIcon(scaled_pixmap))
+            self.team_listbox.addItem(item)
+                
         query = getattr(self, "_fav_search", None)
         if query is not None:
             self._filter_fav_list(query.text())
@@ -3207,14 +3388,44 @@ class CalcFormelHelper(QMainWindow):
         self._start_sync()
 
     def _filter_fav_list(self, text: str):
-        query = text.strip().lower()
-        for attr in ["team_listbox", "fav_listbox", "verlauf_listbox"]:
-            listbox = getattr(self, attr, None)
-            if listbox is None: continue
-            for i in range(listbox.count()):
-                item = listbox.item(i)
-                visible = (not query) or (query in item.text().lower())
-                item.setHidden(not visible)
+        import os
+        from PyQt5.QtGui import QIcon, QPixmap, QBrush, QColor
+        from PyQt5.QtCore import QSize, Qt
+        from PyQt5.QtWidgets import QListWidgetItem
+
+        # Pfad zu deinem Team-Icon ermitteln
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        team_icon_path = os.path.join(base_dir, "Icon", "Team.png")
+        
+        # Sicherstellen, dass die Bildgröße auch beim Filtern 14x14 bleibt
+        self.team_listbox.setIconSize(QSize(14, 14))
+        self.team_listbox.clear()
+        
+        text = text.lower()
+        for entry in self.favoriten:
+            formel = entry.formel
+            label = entry.label
+            is_team = entry.team
+            
+            if text and text not in formel.lower() and text not in label.lower():
+                continue
+                
+            # Auch hier das Text-Symbol komplett entfernen!
+            display = f"{label + '   ' if label else ''}{formel}" if is_team else (
+                f"{label} {formel}" if label else formel)
+                
+            item = QListWidgetItem(display)
+            item.setData(Qt.UserRole, formel)
+            
+            if is_team:
+                item.setForeground(QBrush(QColor(THEME["ui_team_fg"])))
+                item.setToolTip(self.tr("fav_team_tooltip"))
+                
+                # PNG-Icon für gefilterte Team-Einträge setzen
+                if os.path.exists(team_icon_path):
+                    item.setIcon(QIcon(QPixmap(team_icon_path)))
+                    
+            self.team_listbox.addItem(item)
 
     # -----------------------------------------------------------------------
     # Favoriten – Aktionen
